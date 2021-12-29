@@ -22,9 +22,9 @@ M.Tree = {
   target_winid = nil,
 }
 
-local function load_children(cwd, children, parent)
+local function load_children(cwd, children, is_remote, parent)
   git.load_project_status(cwd, function(git_statuses)
-    populate(children, cwd, parent, git_statuses)
+    populate(children, cwd, parent, git_statuses, is_remote)
     M.redraw()
   end)
 end
@@ -32,12 +32,13 @@ end
 function M.init(with_open, foldername)
   M.Tree.entries = {}
   M.Tree.cwd = foldername or luv.cwd()
+  local is_remote = vim.startswith(M.Tree.cwd, 'distant')
 
   if with_open then
     M.open()
   end
 
-  load_children(M.Tree.cwd, M.Tree.entries)
+  load_children(M.Tree.cwd, M.Tree.entries, is_remote)
 
   if not first_init_done then
     events._dispatch_ready()
@@ -131,6 +132,7 @@ function M.expand_or_collapse(node)
     load_children(
       node.link_to or node.absolute_path,
       node.entries,
+      node.is_remote,
       node
     )
   else
@@ -327,7 +329,13 @@ function M.pick_window()
   return win_map[resp]
 end
 
-function M.open_file(mode, filename)
+function M.open_file(mode, filename, is_remote)
+  -- expand filename
+  if is_remote then
+    filename = 'distant://' .. filename
+  end
+
+  -- TODO: What should I do when the file is openend in the new tab
   if mode == "tabnew" then
     M.open_file_in_tab(filename)
     return
@@ -389,9 +397,15 @@ function M.open_file(mode, filename)
       cmd = "edit "
     end
 
-    cmd = cmd .. vim.fn.fnameescape(filename)
-    api.nvim_set_current_win(target_winid)
-    vim.cmd(cmd)
+    if is_remote then
+      cmd = "DistantOpen " .. vim.fn.fnameescape(filename)
+      api.nvim_set_current_win(target_winid)
+      vim.cmd(cmd)
+    else
+      cmd = cmd .. vim.fn.fnameescape(filename)
+      api.nvim_set_current_win(target_winid)
+      vim.cmd(cmd)
+    end
     view.resize()
   end
 
@@ -458,6 +472,7 @@ end
 local current_tab = api.nvim_get_current_tabpage()
 
 function M.change_dir(name)
+  local is_remote = vim.startswith(name, 'distant')
   local foldername = name == '..' and vim.fn.fnamemodify(M.Tree.cwd, ':h') or name
   local no_cwd_change = vim.fn.expand(foldername) == M.Tree.cwd
   local new_tab = api.nvim_get_current_tabpage()
@@ -467,7 +482,7 @@ function M.change_dir(name)
   end
   current_tab = new_tab
 
-  vim.cmd('lcd '..vim.fn.fnameescape(foldername))
+  --vim.cmd('lcd '..vim.fn.fnameescape(foldername))
   M.init(false, foldername)
 end
 

@@ -1,5 +1,6 @@
 local api = vim.api
 local luv = vim.loop
+local fs = require('nvim-tree.fs_abstract')
 
 local utils = require'nvim-tree.utils'
 
@@ -8,16 +9,19 @@ local M = {
   is_windows = vim.fn.has('win32') == 1
 }
 
-local function dir_new(cwd, name, status, parent_ignored)
+local function dir_new(cwd, name, status, parent_ignored, is_remote)
   local absolute_path = utils.path_join({cwd, name})
-  local stat = luv.fs_stat(absolute_path)
-  local handle = luv.fs_scandir(absolute_path)
-  local has_children = handle and luv.fs_scandir_next(handle) ~= nil
+  --local stat = luv.fs_stat(absolute_path)
+  local stat = fs.stat(absolute_path, is_remote)
+  --local handle = luv.fs_scandir(absolute_path)
+  local handle = fs.scandir(absolute_path, is_remote)
+  local has_children = handle and fs.scandir_next(handle, is_remote) ~= nil
 
   --- This is because i have some folders that i dont have permissions to read its metadata, so i have to check that stat returns a valid info
   local last_modified = 0
   if stat ~= nil then
-    last_modified = stat.mtime.sec
+    --last_modified = stat.mtime.sec
+    last_modified = fs.get_last_modified_time(stat, is_remote)
   end
 
   return {
@@ -30,17 +34,19 @@ local function dir_new(cwd, name, status, parent_ignored)
     has_children = has_children,
     entries = {},
     git_status = parent_ignored and '!!' or (status.dirs and status.dirs[absolute_path]) or (status.files and status.files[absolute_path]),
+    is_remote = is_remote,
   }
 end
 
-local function file_new(cwd, name, status, parent_ignored)
+local function file_new(cwd, name, status, parent_ignored, is_remote)
   local absolute_path = utils.path_join({cwd, name})
   local ext = string.match(name, ".?[^.]+%.(.*)") or ""
   local is_exec
   if M.is_windows then
     is_exec = utils.is_windows_exe(ext)
   else
-    is_exec = luv.fs_access(absolute_path, 'X')
+    --is_exec = luv.fs_access(absolute_path, 'X')
+    is_exec = fs.access(absolute_path, 'X', is_remote)
   end
   return {
     name = name,
@@ -48,6 +54,7 @@ local function file_new(cwd, name, status, parent_ignored)
     executable = is_exec,
     extension = ext,
     git_status = parent_ignored and '!!' or status.files and status.files[absolute_path],
+    is_remote = is_remote,
   }
 end
 
@@ -56,20 +63,24 @@ end
 -- links (for instance libr2.so in /usr/lib) and thus even with a C program realpath fails
 -- when it has no real reason to. Maybe there is a reason, but errno is definitely wrong.
 -- So we need to check for link_to ~= nil when adding new links to the main tree
-local function link_new(cwd, name, status, parent_ignored)
+local function link_new(cwd, name, status, parent_ignored, is_remote)
   --- I dont know if this is needed, because in my understanding, there isnt hard links in windows, but just to be sure i changed it.
   local absolute_path = utils.path_join({ cwd, name })
-  local link_to = luv.fs_realpath(absolute_path)
-  local stat = luv.fs_stat(absolute_path)
+  --local link_to = luv.fs_realpath(absolute_path)
+  local link_to = fs.realpath(absolute_path, is_remote)
+  --local stat = luv.fs_stat(absolute_path)
+  local stat = fs.stat(absolute_path, is_remote)
   local open, entries
-  if (link_to ~= nil) and luv.fs_stat(link_to).type == 'directory' then
+  --if (link_to ~= nil) and luv.fs_stat(link_to).type == 'directory' then
+  if (link_to ~= nil) and fs.get_type(fs.stat(link_to, is_remote), is_remote) == 'directory' then
     open = false
     entries = {}
   end
 
   local last_modified = 0
   if stat ~= nil then
-    last_modified = stat.mtime.sec
+    --last_modified = stat.mtime.sec
+    last_modified = fs.get_last_modified_time(stat, is_remote)
   end
 
   return {
@@ -81,6 +92,7 @@ local function link_new(cwd, name, status, parent_ignored)
     group_next = nil,   -- If node is grouped, this points to the next child dir/link node
     entries = entries,
     git_status = parent_ignored and '!!' or status.files and status.files[absolute_path],
+    is_remote = is_remote,
   }
 end
 
@@ -89,15 +101,17 @@ end
 -- @param dirs List of dir names
 -- @param files List of file names
 -- @param links List of symlink names
-local function should_group(cwd, dirs, files, links)
+local function should_group(cwd, dirs, files, links, is_remote)
   if #dirs == 1 and #files == 0 and #links == 0 then
     return true
   end
 
   if #dirs == 0 and #files == 0 and #links == 1 then
     local absolute_path = utils.path_join({ cwd, links[1] })
-    local link_to = luv.fs_realpath(absolute_path)
-    return (link_to ~= nil) and luv.fs_stat(link_to).type == 'directory'
+    --local link_to = luv.fs_realpath(absolute_path)
+    local link_to = fs.realpath(absolute_path, is_remote)
+    --return (link_to ~= nil) and luv.fs_stat(link_to).type == 'directory'
+    return (link_to ~= nil) and fs.get_type(fs.stat(link_to, is_remote), is_remote) == 'directory'
   end
 
   return false
@@ -152,7 +166,13 @@ local function should_ignore_git(path, status)
 end
 
 function M.refresh_entries(entries, cwd, parent_node, status)
-  local handle = luv.fs_scandir(cwd)
+  if is_remote and vim.startswith(cwd, 'distant') then
+    cwd = string.sub(cwd, string.len('distant://') + 1, string.len(cwd))
+  end
+  --local handle = luv.fs_scandir(cwd)
+  -- TODO: remote distant in cwd
+  --local handle = luv.fs_scandir(cwd, is_remote)
+  local handle = fs.scandir(cwd, is_remote)
   if type(handle) == 'string' then
     api.nvim_err_writeln(handle)
     return
@@ -177,14 +197,16 @@ function M.refresh_entries(entries, cwd, parent_node, status)
   local num_new_entries = 0
 
   while true do
-    local name, t = luv.fs_scandir_next(handle)
+    --local name, t = luv.fs_scandir_next(handle)
+    local name, t = fs.scandir_next(handle, is_remote)
     if not name then break end
     num_new_entries = num_new_entries + 1
 
     local abs = utils.path_join({cwd, name})
     if not should_ignore(abs) and not should_ignore_git(abs, status.files) then
       if not t then
-        local stat = luv.fs_stat(abs)
+        --local stat = luv.fs_stat(abs)
+        local stat = fs.stat(abs, is_remote)
         t = stat and stat.type
       end
 
@@ -221,7 +243,8 @@ function M.refresh_entries(entries, cwd, parent_node, status)
     local node = named_entries[name]
     if node and node.link_to then
       -- If the link has been modified: remove it in case the link target has changed.
-      local stat = luv.fs_stat(node.absolute_path)
+      --local stat = luv.fs_stat(node.absolute_path)
+      local stat = fs.stat(node.absolute_path, is_remote)
       if stat and node.last_modified ~= stat.mtime.sec then
         new_entries[name] = nil
         named_entries[name] = nil
@@ -236,7 +259,8 @@ function M.refresh_entries(entries, cwd, parent_node, status)
   end
 
   local all = {
-    { entries = dirs, fn = dir_new, check = function(_, abs) return luv.fs_access(abs, 'R') end },
+    --{ entries = dirs, fn = dir_new, check = function(_, abs) return luv.fs_access(abs, 'R') end },
+    { entries = dirs, fn = dir_new, check = function(_, abs) return fs.access(abs, 'R', is_remote) end },
     { entries = links, fn = link_new, check = function(name) return name ~= nil end },
     { entries = files, fn = file_new, check = function() return true end }
   }
@@ -248,7 +272,7 @@ function M.refresh_entries(entries, cwd, parent_node, status)
     for _, name in ipairs(e.entries) do
       change_prev = true
       if not named_entries[name] then
-        local n = e.fn(cwd, name, status)
+        local n = e.fn(cwd, name, status, is_remote)
         if e.check(n.link_to, n.absolute_path) then
           new_nodes_added = true
           idx = 1
@@ -277,8 +301,14 @@ function M.refresh_entries(entries, cwd, parent_node, status)
   end
 end
 
-function M.populate(entries, cwd, parent_node, status)
-  local handle = luv.fs_scandir(cwd)
+function M.populate(entries, cwd, parent_node, status, is_remote)
+  --local is_remote = vim.startswith(cwd, 'distant')
+  if is_remote and vim.startswith(cwd, 'distant') then
+    cwd = string.sub(cwd, string.len('distant://') + 1, string.len(cwd))
+  end
+  -- TODO: remove distant in cwd
+  --local handle = luv.fs_scandir(cwd)
+  local handle = fs.scandir(cwd, is_remote)
   if type(handle) == 'string' then
     api.nvim_err_writeln(handle)
     return
@@ -289,13 +319,15 @@ function M.populate(entries, cwd, parent_node, status)
   local files = {}
 
   while true do
-    local name, t = luv.fs_scandir_next(handle)
+    --local name, t = luv.fs_scandir_next(handle)
+    local name, t = fs.scandir_next(handle, is_remote)
     if not name then break end
 
     local abs = utils.path_join({cwd, name})
     if not should_ignore(abs) and not should_ignore_git(abs, status.files) then
       if not t then
-        local stat = luv.fs_stat(abs)
+        --local stat = luv.fs_stat(abs)
+        local stat = fs.stat(abs, is_remote)
         t = stat and stat.type
       end
 
@@ -316,7 +348,8 @@ function M.populate(entries, cwd, parent_node, status)
       local child_node
       if dirs[1] then child_node = dir_new(cwd, dirs[1], status, parent_node_ignored) end
       if links[1] then child_node = link_new(cwd, links[1], status, parent_node_ignored) end
-      if luv.fs_access(child_node.absolute_path, 'R') then
+      --if luv.fs_access(child_node.absolute_path, 'R') then
+      if fs.access(child_node.absolute_path, 'R', is_remote) then
         parent_node.group_next = child_node
         child_node.git_status = parent_node.git_status
         M.populate(entries, child_node.absolute_path, child_node, status)
@@ -326,21 +359,22 @@ function M.populate(entries, cwd, parent_node, status)
   end
 
   for _, dirname in ipairs(dirs) do
-    local dir = dir_new(cwd, dirname, status, parent_node_ignored)
-    if luv.fs_access(dir.absolute_path, 'R') then
+    local dir = dir_new(cwd, dirname, status, parent_node_ignored, is_remote)
+    --if luv.fs_access(dir.absolute_path, 'R') then
+    if fs.access(dir.absolute_path, 'R', is_remote) then
       table.insert(entries, dir)
     end
   end
 
   for _, linkname in ipairs(links) do
-    local link = link_new(cwd, linkname, status, parent_node_ignored)
+    local link = link_new(cwd, linkname, status, parent_node_ignored, is_remote)
     if link.link_to ~= nil then
       table.insert(entries, link)
     end
   end
 
   for _, filename in ipairs(files) do
-    local file = file_new(cwd, filename, status, parent_node_ignored)
+    local file = file_new(cwd, filename, status, parent_node_ignored, is_remote)
     table.insert(entries, file)
   end
 

@@ -101,7 +101,7 @@ local keypress_funcs = {
   close = function() M.close() end,
   preview = function(node)
     if node.entries ~= nil or node.name == '..' then return end
-    return lib.open_file('preview', node.absolute_path)
+    return lib.open_file('preview', node.absolute_path, node.is_remote)
   end,
   system_open = function(node)
     if not _config.system_open.cmd then
@@ -173,11 +173,11 @@ function M.on_keypress(mode)
   end
 
   if node.link_to and not node.entries then
-    lib.open_file(mode, node.link_to)
+    lib.open_file(mode, node.link_to, node.is_remote)
   elseif node.entries ~= nil then
     lib.expand_or_collapse(node)
   else
-    lib.open_file(mode, node.absolute_path)
+    lib.open_file(mode, node.absolute_path, node.is_remote)
   end
 end
 
@@ -234,6 +234,7 @@ local function is_file_readable(fname)
 end
 
 local function update_base_dir_with_filepath(filepath, bufnr)
+  print("HELLO")
   if not _config.update_focused_file.update_cwd then
     return
   end
